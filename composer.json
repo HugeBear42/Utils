@@ -1,0 +1,31 @@
+{
+    "name": "hugebear/utils",
+    "description": "Utilities & helpers I use in my projects",
+    "type": "library",
+    "license": "MIT",
+    "require": {
+        "php": "^8.1",
+      "ext-pdo": "*"
+    },
+    "autoload": {
+        "psr-4": {
+            "HugeBear42\\Utils\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "HugeBear42\\Utils\\Tests\\": "tests/"
+        }
+    },
+    "authors": [
+        {
+            "name": "Frank Hubert",
+            "email": "frank.a.hubert@gmail.com"
+        }
+    ],
+    "minimum-stability": "stable",
+    "prefer-stable": true,
+    "require-dev": {
+        "phpunit/phpunit": "^11.5"
+    }
+}
