@@ -22,14 +22,20 @@ class Database
     {
         $options = [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION, PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC];    // Throw exception on error, return assoc arrays!
         $dsn = '';
-        if ($config['type'] === 'sqlsrv') {
+        if ($config['type'] === 'sqlsrv')
+        {
             $dsn = $config['type'] . ":Server={$config['connection']['host']}" . (array_key_exists("port", $config['connection']) ? ",{$config['connection']['port']}" : '') . ";Database={$config['connection']['dbname']}";
-            if (defined('PDO::SQLSRV_ATTR_CURSOR_SCROLL_TYPE')) {
+            if (defined('PDO::SQLSRV_ATTR_CURSOR_SCROLL_TYPE'))
+            {
                 $this->optionsArray = [PDO::ATTR_CURSOR => PDO::CURSOR_SCROLL, PDO::SQLSRV_ATTR_CURSOR_SCROLL_TYPE => PDO::SQLSRV_CURSOR_BUFFERED];
             }
-        } else if ($config['type'] === 'mysql') {
+            $options[PDO::SQLSRV_ATTR_ENCODING] = PDO::SQLSRV_ENCODING_UTF8;    // Added 2025-10-10 utf-8 to be used with NVARCHAR
+        }
+        else if ($config['type'] === 'mysql')
+        {
             $dsn = $config['type'] . ':' . http_build_query($config['connection'], '', ';');
-        } else {
+        } else
+        {
             throw new ApplicationException("Unsupported database type {$config['type']}");
         }
 
