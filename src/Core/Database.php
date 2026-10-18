@@ -34,13 +34,28 @@ class Database
         else if ($config['type'] === 'mysql')
         {
             $dsn = $config['type'] . ':' . http_build_query($config['connection'], '', ';');
-        } else
+        }
+        else if ($config['type'] === 'sqlite')     // Added 2026-10-18: a file, or ':memory:' for a temporary database (e.g. unit tests)
+        {
+            $path = (string)($config['connection']['path'] ?? '');
+            if ($path === '')
+            {
+                throw new ApplicationException("SQLite database without a path: set connection.path to a file or ':memory:'");
+            }
+            $dsn = 'sqlite:' . $path;
+        }
+		else
         {
             throw new ApplicationException("Unsupported database type {$config['type']}");
         }
 
-        $this->connection = new PDO($dsn, $config['user'], $config['pass'], $options);
+        $this->connection = new PDO($dsn, $config['user'] ?? null, $config['pass'] ?? null, $options);    // No user & password for SQLite
         $this->type = $config['type'];
+        if ($this->type === 'sqlite')
+        {
+            $this->connection->exec('PRAGMA foreign_keys = ON');    // Off by default in SQLite, on in MySQL & SQL Server
+            $this->connection->exec('PRAGMA busy_timeout = 5000');  // Wait up to 5 s for a file locked by another process instead of failing
+        }
     }
 
     public function query(string $query, array $params = []): Database
