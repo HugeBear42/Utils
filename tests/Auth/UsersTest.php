@@ -314,6 +314,34 @@ final class UsersTest extends TestCase
 		$this->assertTrue(Users::attemptLogin('frank', 'a brand new password')->ok());
 	}
 
+	// A login then an event, as a login page does: two connections to one SQLite file, the second must be able to write
+	public function testAnotherConnectionCanWriteAfterALogin(): void
+	{
+		$file=sys_get_temp_dir().DIRECTORY_SEPARATOR.'userstest_'.uniqid().'.sqlite';
+		try
+		{
+			$settings=['type'=>'sqlite', 'connection'=>['path'=>$file]];
+			Users::configure(['db'=>$settings, 'roles'=>['operator']]);
+			Users::createTable();
+			Users::create('frank', self::PASSWORD, 'operator');
+			$other=new \HugeBear42\Utils\Core\Database($settings);
+			$other->connection->exec('PRAGMA busy_timeout = 0');		// Fail at once instead of waiting 5 s
+			$other->connection->exec('CREATE TABLE IF NOT EXISTS log (message TEXT)');
+
+			$this->assertTrue(Users::attemptLogin('frank', self::PASSWORD)->ok());
+			Users::findByUsername('frank');
+			$other->query('INSERT INTO log (message) VALUES (:m)', ['m'=>'logged in']);
+			$this->assertSame(1, $other->rowCount());
+		}
+		finally
+		{
+			Users::configure(['db'=>['type'=>'sqlite', 'connection'=>['path'=>':memory:']]]);		// Releases the file
+			unset($other);
+			gc_collect_cycles();
+			@unlink($file);
+		}
+	}
+
 	// --- The table ---
 
 	public function testSchemaForEveryDatabase(): void

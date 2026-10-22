@@ -8,6 +8,7 @@ use HugeBear42\Utils\Core\ApplicationException;
 use HugeBear42\Utils\Core\Database;
 /**
 	2026-10-22	v1.00	frank.a.hubert@gmail.com: The users of an application, stored in a database table, with a role & a preferred language.
+	2026-10-22	v1.01	The reads close their query: an open one kept a SQLite file locked for another connection (e.g. EventLog's), whose writes failed
 
 	Setup, once per request or script:
 		Users::configure(['db' => $config['db'], 'table' => 'users', 'roles' => ['operator', 'administrator']]);
@@ -320,7 +321,9 @@ class Users
 
 	private static function findRow(string $condition, array $params) : ?array
 	{
-		$row = self::database()->query('SELECT * FROM '.self::$table." WHERE $condition", $params)->find();
+		$db = self::database();
+		$row = $db->query('SELECT * FROM '.self::$table." WHERE $condition", $params)->find();
+		$db->getStatement()->closeCursor();		// A query left open keeps a SQLite file locked for another connection (e.g. EventLog's)
 		return $row ?: null;
 	}
 
