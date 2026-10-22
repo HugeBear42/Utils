@@ -3,16 +3,17 @@
 declare(strict_types=1);
 
 namespace HugeBear42\Utils\Middleware;
+use HugeBear42\Utils\Auth\Session;
 use HugeBear42\Utils\Core\Logger;
 class Guest
 {
     public function handle() : void
     {
-        if( $_SESSION['user'] ?? false )
+        if( Session::check() )
         {
-            Logger::error("Guest: user not authorised!");
+            Logger::fine("Guest: already logged in, sent to the home page");
             header('location: /');
             exit();
         }
     }
-}
+}
