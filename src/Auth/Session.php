@@ -6,6 +6,8 @@ namespace HugeBear42\Utils\Auth;
 /**
 	2026-10-22	v1.00	frank.a.hubert@gmail.com: The logged-in user of a web application: login, logout, idle timeout,
 	                    the token protecting the forms (CSRF) & the permissions of the roles.
+	2026-10-23	v1.01	start(false) for a request the page sends by itself (e.g. a periodic status check): it sees an expired
+	                    login but does not count as activity, otherwise an open page would keep the user logged in for ever
 
 	Setup, at the start of every request (front controller):
 		Session::configure([
@@ -15,7 +17,7 @@ namespace HugeBear42\Utils\Auth;
 				'administrator' => ['*'],			// every permission
 			],
 		]);
-		Session::start();
+		Session::start();                          // Session::start(false) for a background request, see start()
 	Use:
 		Session::login($user);                     // after Users::attemptLogin() succeeded
 		Session::can('jobs.manage');               // in a controller or a view
@@ -59,8 +61,10 @@ class Session
 	/**
 	 * Starts the PHP session with safe cookie settings, if not started yet, & logs out a user idle for too long.
 	 * Call it before any output.
+	 * $isActivity: false for a request the page sends by itself, not the user (e.g. a status check every 30 seconds).
+	 * It is still refused once the user is idle for too long, but does not restart the idle time.
 	 */
-	public static function start() : void
+	public static function start(bool $isActivity = true) : void
 	{
 		if(session_status() !== PHP_SESSION_ACTIVE)
 		{
@@ -76,14 +80,14 @@ class Session
 			]);
 			session_start();
 		}
-		self::checkIdle();
+		self::checkIdle(null, $isActivity);
 	}
 
 	/**
-	 * Logs out the user if the last request is older than 'idleMinutes', then notes this request's time.
+	 * Logs out the user if the last activity is older than 'idleMinutes', then notes this request's time if $isActivity.
 	 * Called by start(). $now is for the tests (a Unix time), default: now. Works on $_SESSION only.
 	 */
-	public static function checkIdle(?int $now = null) : void
+	public static function checkIdle(?int $now = null, bool $isActivity = true) : void
 	{
 		$now ??= time();
 		if(self::check() && isset($_SESSION[self::ACTIVITY_KEY]) && $now - (int)$_SESSION[self::ACTIVITY_KEY] > self::$idleMinutes * 60)
@@ -91,7 +95,8 @@ class Session
 			self::clear();
 			self::$expired = true;
 		}
-		$_SESSION[self::ACTIVITY_KEY] = $now;
+		if($isActivity || !isset($_SESSION[self::ACTIVITY_KEY]))
+		{	$_SESSION[self::ACTIVITY_KEY] = $now;	}
 	}
 
 	// True if start() logged the user out in this request because of the idle timeout, e.g. to show "logged out after inactivity"

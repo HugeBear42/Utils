@@ -94,6 +94,30 @@ final class SessionTest extends TestCase
 		$this->assertFalse(Session::check());
 	}
 
+	public function testBackgroundRequestsDoNotKeepTheUserLoggedIn(): void
+	{
+		Session::login($this->user());
+		$start=time();
+		for($minute=10; $minute<=60; $minute+=10)		// A status check every 10 minutes: not activity
+		{
+			Session::checkIdle($start+$minute*60, false);
+			$this->assertTrue(Session::check(), "still logged in after $minute minutes");
+		}
+		Session::checkIdle($start+61*60, false);		// 61 minutes after the last activity: logged out
+		$this->assertFalse(Session::check());
+		$this->assertTrue(Session::expired());
+	}
+
+	public function testActivityAfterBackgroundRequests(): void
+	{
+		Session::login($this->user());
+		$start=time();
+		Session::checkIdle($start+50*60, false);
+		Session::checkIdle($start+55*60);				// The user clicks: the idle time starts again
+		Session::checkIdle($start+110*60, false);
+		$this->assertTrue(Session::check());
+	}
+
 	public function testNoTimeoutWithoutUser(): void
 	{
 		Session::checkIdle(time()+24*3600);
