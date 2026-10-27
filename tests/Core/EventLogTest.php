@@ -46,6 +46,36 @@ final class EventLogTest extends TestCase
 			['created_at'=>$createdAt, 'level'=>$level, 'type'=>'test', 'source'=>'test', 'reference'=>$reference, 'message'=>"created $createdAt"]);
 	}
 
+	// The reads, then a write on another connection to the same SQLite file (as a job insert after a check): it must not be blocked
+	public function testAnotherConnectionCanWriteAfterTheReads(): void
+	{
+		$file=sys_get_temp_dir().DIRECTORY_SEPARATOR.'eventlogtest_'.uniqid().'.sqlite';
+		try
+		{
+			$settings=['type'=>'sqlite', 'connection'=>['path'=>$file]];
+			EventLog::configure(['db'=>$settings]);
+			EventLog::createTable();
+			EventLog::info('test', 'test', 'first', '1');
+			$other=new Database($settings);
+			$other->connection->exec('PRAGMA busy_timeout = 0');		// Fail at once instead of waiting 5 s
+			$other->connection->exec('CREATE TABLE IF NOT EXISTS jobs (id INTEGER)');
+
+			$this->assertTrue(EventLog::recentlyRecorded('test', null, 60));
+			$this->assertSame(0, EventLog::countOpen());
+			EventLog::countSince(0);
+			EventLog::find(EventLog::maxId());
+			$other->query('INSERT INTO jobs (id) VALUES (1)');
+			$this->assertSame(1, $other->rowCount());
+		}
+		finally
+		{
+			EventLog::configure(['db'=>['type'=>'sqlite', 'connection'=>['path'=>':memory:']]]);		// Releases the file
+			unset($other);
+			gc_collect_cycles();
+			@unlink($file);
+		}
+	}
+
 	// --- Recording ---
 
 	public function testRecordAndFind(): void

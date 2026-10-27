@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace HugeBear42\Utils\Core;
 /**
+	2026-10-27	v1.01	The single-row reads close their query (fetchOne()): an open one kept a SQLite file locked for another connection
 	2026-10-18	v1.00	frank.a.hubert@gmail.com: Operator events (a rejected request, an export, a resend...) stored in a database table,
 	                    to be shown in an application's dashboard. Generalised from the XMPieDashboardBaloise project.
 
@@ -150,7 +151,7 @@ class EventLog
 				$where[] = 'reference = :reference';
 				$params['reference'] = $reference;
 			}
-			return (int)self::database()->query('SELECT COUNT(*) AS n FROM '.self::$table.' WHERE '.implode(' AND ', $where), $params)->find()['n'] > 0;
+			return (int)self::fetchOne('SELECT COUNT(*) AS n FROM '.self::$table.' WHERE '.implode(' AND ', $where), $params)['n'] > 0;
 		}
 		catch(\Throwable $t)
 		{
@@ -168,7 +169,7 @@ class EventLog
 	public static function countOpen(string $level = self::ERROR) : ?int
 	{
 		try
-		{	return (int)self::database()->query('SELECT COUNT(*) AS n FROM '.self::$table.' WHERE acknowledged_at IS NULL AND level = :level', ['level' => $level])->find()['n'];	}
+		{	return (int)self::fetchOne('SELECT COUNT(*) AS n FROM '.self::$table.' WHERE acknowledged_at IS NULL AND level = :level', ['level' => $level])['n'];	}
 		catch(\Throwable $t)
 		{
 			Logger::error("EventLog: could not count the open $level events: ".$t->getMessage());
@@ -217,19 +218,19 @@ class EventLog
 		[$where, $params] = self::buildFilter($filters);
 		$where[] = 'id > :since_id';
 		$params['since_id'] = $sinceId;
-		$row = self::database()->query("SELECT COUNT(*) AS new_count, SUM(CASE WHEN level = 'error' THEN 1 ELSE 0 END) AS new_errors
-			FROM ".self::$table.' WHERE '.implode(' AND ', $where), $params)->find();
+		$row = self::fetchOne("SELECT COUNT(*) AS new_count, SUM(CASE WHEN level = 'error' THEN 1 ELSE 0 END) AS new_errors
+			FROM ".self::$table.' WHERE '.implode(' AND ', $where), $params);
 		return ['new' => (int)$row['new_count'], 'newErrors' => (int)$row['new_errors']];	// SUM() is NULL when there are none
 	}
 
 	// The highest event id, 0 if there are none: the events recorded later have a higher id. Throws on a database error.
 	public static function maxId() : int
-	{	return (int)(self::database()->query('SELECT MAX(id) AS max_id FROM '.self::$table)->find()['max_id'] ?? 0);	}
+	{	return (int)(self::fetchOne('SELECT MAX(id) AS max_id FROM '.self::$table)['max_id'] ?? 0);	}
 
 	// One event with its payload, or an empty array if it does not exist. Throws on a database error.
 	public static function find(int $id) : array
 	{
-		$row = self::database()->query('SELECT * FROM '.self::$table.' WHERE id = :id', ['id' => $id])->find();
+		$row = self::fetchOne('SELECT * FROM '.self::$table.' WHERE id = :id', ['id' => $id]);
 		return $row ?: [];
 	}
 
@@ -349,6 +350,15 @@ class EventLog
 	}
 
 	// --- Helpers ---
+
+	// One row (or false), the query closed at once: an open query keeps a SQLite file locked for another connection (e.g. a job insert)
+	private static function fetchOne(string $query, array $params = []) : array|false
+	{
+		$db = self::database();
+		$row = $db->query($query, $params)->find();
+		$db->getStatement()->closeCursor();
+		return $row;
+	}
 
 	// The WHERE conditions & parameters of the filters, shared by listEvents() & countSince()
 	private static function buildFilter(array $filters) : array

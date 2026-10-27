@@ -8,6 +8,8 @@ use HugeBear42\Utils\Core\ApplicationException;
 use HugeBear42\Utils\Core\EventLog;
 use HugeBear42\Utils\Core\Logger;
 /**
+	2026-10-27	v1.01	pause() & resume() a task, e.g. from a dashboard: a paused task is skipped (a forced run still runs it),
+	                    a reminder warning every 'remindPausedMinutes' while the pause lasts
 	2026-10-27	v1.00	frank.a.hubert@gmail.com: Runs the due tasks of a Schedule, each as a separate PHP process.
 	                    Meant to be started every minute by the system (one Windows Task Scheduler entry or one cron line):
 
@@ -26,6 +28,8 @@ use HugeBear42\Utils\Core\Logger;
 	- A failed run (exit code not 0, timeout, missing script) is recorded as an EventLog error (source scheduler)
 	  when the failure starts or changes, then once per 'repeatMinutes' while it goes on (a task failing every minute
 	  would fill the events list). A successful run is only logged at the 'fine' level, its return after failures at 'info'
+	- A paused task (pause(), kept in the state file until resume()) is not run by the schedule, run($taskName) still runs it.
+	  While the pause lasts, an EventLog warning (task_paused) every 'remindPausedMinutes' reminds that it is paused
 **/
 
 final class Scheduler
@@ -36,8 +40,10 @@ final class Scheduler
 	public const RUNNING = 'running';			// Skipped: still running from an earlier start
 	public const MISSING = 'missing';			// The script does not exist
 	public const NOT_STARTED = 'not_started';	// The PHP process could not be started
+	public const PAUSED = 'paused';				// Skipped: paused, see pause()
 
 	private const STATE_FILE = 'scheduler-state.json';
+	private const MAX_REASON_CHARS = 200;
 	private const OUTPUT_TAIL_BYTES = 2000;		// The end of the output kept in a failure event
 	private const POLL_MICROSECONDS = 200000;
 
@@ -46,6 +52,7 @@ final class Scheduler
 	private int $defaultTimeout;
 	private bool $recordEvents;
 	private int $repeatSeconds;
+	private int $remindPausedSeconds;			// 0: no reminder
 	private string $phpBinary;
 	private ?int $now;
 
@@ -57,6 +64,7 @@ final class Scheduler
 	 *   'events'    => true to record the failures with EventLog, which must be configured (default: true),
 	 *                  false to only log them
 	 *   'repeatMinutes' => a failure that goes on is reported again after this many minutes (default: 60)
+	 *   'remindPausedMinutes' => a paused task is reminded by a warning every this many minutes, 0 for never (default: 120)
 	 *   'phpBinary' => the PHP running the tasks (default: the one running the scheduler)
 	 *   'now'       => a Unix time instead of the current time, for the tests
 	 * @throws \InvalidArgumentException for a missing stateDir or an unknown time zone
@@ -74,6 +82,7 @@ final class Scheduler
 		$this->defaultTimeout = max(1, (int)($options['timeout'] ?? 3600));
 		$this->recordEvents = (bool)($options['events'] ?? true);
 		$this->repeatSeconds = max(1, (int)($options['repeatMinutes'] ?? 60)) * 60;
+		$this->remindPausedSeconds = max(0, (int)($options['remindPausedMinutes'] ?? 120)) * 60;
 		$this->phpBinary = (string)($options['phpBinary'] ?? PHP_BINARY);
 		$this->now = isset($options['now']) ? (int)$options['now'] : null;
 	}
@@ -91,14 +100,30 @@ final class Scheduler
 		$tick = $this->tick();
 		$results = [];
 		$toStart = [];		// name => [Task, lock handle]
+		$reminders = [];	// name => pause, the paused tasks to remind
 
 	// 1. Which tasks are due & free: decided under the state lock, so two schedulers started together do not both run a task
-		$this->withState(function(array &$state) use ($taskName, $tick, &$results, &$toStart)
+		$this->withState(function(array &$state) use ($taskName, $tick, &$results, &$toStart, &$reminders)
 		{
+			$now = $this->now ?? time();
 			foreach($this->schedule->tasks() as $name => $task)
 			{
 				$forced = $taskName !== null;
-				if(($forced && $name !== $taskName) || (!$forced && !$task->isDue($state[$name]['lastRun'] ?? null, $tick, $this->timezone)))
+				if($forced && $name !== $taskName)
+				{	continue;	}
+				if(!$forced && isset($state[$name]['paused']))		// Skipped, & reminded once in a while
+				{
+					$pause = &$state[$name]['paused'];
+					$results[$name] = $this->result(self::PAUSED);
+					if($this->remindPausedSeconds > 0 && $now - (int)($pause['reminded'] ?? $pause['since']) >= $this->remindPausedSeconds)
+					{
+						$pause['reminded'] = $now;
+						$reminders[$name] = $pause;
+					}
+					unset($pause);
+					continue;
+				}
+				if(!$forced && !$task->isDue($state[$name]['lastRun'] ?? null, $tick, $this->timezone))
 				{	continue;	}
 				$lock = $this->lockTask($name);
 				if($lock === null)
@@ -150,7 +175,7 @@ final class Scheduler
 			$now = $this->now ?? time();
 			foreach($results as $name => $result)
 			{
-				if($result['status'] === self::RUNNING)
+				if($result['status'] === self::RUNNING || $result['status'] === self::PAUSED)
 				{	continue;	}
 				$state[$name]['lastStatus'] = $result['status'];
 				$state[$name]['lastExitCode'] = $result['exitCode'];
@@ -176,12 +201,74 @@ final class Scheduler
 		});
 		foreach($reports as $name => $report)
 		{	$this->report($this->schedule->task($name), $results[$name], $report);	}
+		foreach($reminders as $name => $pause)
+		{
+			$message = "Task $name is still paused, since ".gmdate('Y-m-d H:i', (int)$pause['since']).' UTC'
+				.($pause['by'] !== null ? " by {$pause['by']}" : '').($pause['reason'] !== null ? ": {$pause['reason']}" : '');
+			$this->recordEvents ? EventLog::warning('task_paused', 'scheduler', $message) : Logger::warning("Scheduler: $message");
+		}
 		return $results;
+	}
+
+	// --- Pausing ---
+
+	/**
+	 * Pauses a task: the schedule does not run it until resume(). $by & $reason are kept for the reminders & a dashboard.
+	 * Returns false if the task was already paused (that pause is kept unchanged).
+	 * @throws \InvalidArgumentException for an unknown task
+	 * @throws ApplicationException if the state folder cannot be created or written
+	 */
+	public function pause(string $taskName, ?string $by = null, ?string $reason = null) : bool
+	{
+		$this->checkTask($taskName);
+		$reason = $reason === null || trim($reason) === '' ? null : mb_substr(trim($reason), 0, self::MAX_REASON_CHARS);
+		$paused = false;
+		$this->withState(function(array &$state) use ($taskName, $by, $reason, &$paused)
+		{
+			if(isset($state[$taskName]['paused']))
+			{	return;	}
+			$state[$taskName]['paused'] = ['since' => $this->now ?? time(), 'by' => $by, 'reason' => $reason];
+			$paused = true;
+		});
+		return $paused;
+	}
+
+	/**
+	 * Ends the pause of a task: it runs again at its next due time (at once if a run was missed).
+	 * Returns the pause that ended (['since', 'by', 'reason']), or null if the task was not paused.
+	 * @throws \InvalidArgumentException for an unknown task
+	 * @throws ApplicationException if the state folder cannot be created or written
+	 */
+	public function resume(string $taskName) : ?array
+	{
+		$this->checkTask($taskName);
+		$ended = null;
+		$this->withState(function(array &$state) use ($taskName, &$ended)
+		{
+			$ended = $state[$taskName]['paused'] ?? null;
+			unset($state[$taskName]['paused']);
+		});
+		return $ended === null ? null : array_intersect_key($ended, array_flip(['since', 'by', 'reason']));
+	}
+
+	// The pause of a task (['since' => Unix time, 'by', 'reason']), or null if it is not paused
+	public function pausedInfo(string $taskName) : ?array
+	{
+		$this->checkTask($taskName);
+		$pause = $this->readState()[$taskName]['paused'] ?? null;
+		return $pause === null ? null : array_intersect_key($pause, array_flip(['since', 'by', 'reason']));
+	}
+
+	private function checkTask(string $taskName) : void
+	{
+		if($this->schedule->task($taskName) === null)
+		{	throw new \InvalidArgumentException("Scheduler: no task '$taskName', the tasks are: ".implode(', ', array_keys($this->schedule->tasks())));	}
 	}
 
 	/**
 	 * Every task with its schedule & state, e.g. for a 'list' command:
-	 * name => ['task' => Task, 'running' => bool, 'nextRun' => Unix time, 'lastRun', 'lastStatus', 'lastExitCode', 'lastSeconds', 'lastFinished' (null if never)]
+	 * name => ['task' => Task, 'running' => bool, 'nextRun' => Unix time, 'lastRun', 'lastStatus', 'lastExitCode', 'lastSeconds', 'lastFinished' (null if never),
+	 *          'paused' => ['since', 'by', 'reason'] or null]
 	 */
 	public function status() : array
 	{
@@ -203,6 +290,7 @@ final class Scheduler
 				'lastExitCode' => $taskState['lastExitCode'] ?? null,
 				'lastSeconds'  => $taskState['lastSeconds'] ?? null,
 				'lastFinished' => $taskState['lastFinished'] ?? null,
+				'paused'       => isset($taskState['paused']) ? array_intersect_key($taskState['paused'], array_flip(['since', 'by', 'reason'])) : null,
 			];
 		}
 		return $list;

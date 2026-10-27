@@ -221,6 +221,78 @@ final class SchedulerTest extends TestCase
 		$this->assertStringContainsString('Task broken failed with exit code 1', (string)file_get_contents(Logger::getLogFile()));
 	}
 
+	// --- Pausing ---
+
+	public function testPausedTaskIsSkippedUntilResumed(): void
+	{
+		$schedule=new Schedule($this->dir);
+		$schedule->every('1 minute', $this->script('export', 'echo "exported";'));
+		$schedule->every('1 minute', $this->script('other', 'echo "ok";'));
+		$start=strtotime('2026-10-27 10:00:00 UTC');
+
+		$this->assertTrue($this->scheduler($schedule, $start)->pause('export', 'anna', '  Paper change  '));
+		$results=$this->scheduler($schedule, $start+60)->run();
+		$this->assertSame(Scheduler::PAUSED, $results['export']['status']);
+		$this->assertSame(Scheduler::OK, $results['other']['status']);			// The other tasks run as usual
+		$this->assertFileDoesNotExist($this->dir.'/state/export.out.txt');
+
+		$pause=$this->scheduler($schedule, $start+120)->pausedInfo('export');
+		$this->assertSame(['since'=>$start, 'by'=>'anna', 'reason'=>'Paper change'], $pause);
+		$this->assertSame($pause, $this->scheduler($schedule, $start+120)->status()['export']['paused']);
+
+		$this->assertSame($pause, $this->scheduler($schedule, $start+180)->resume('export'));
+		$this->assertNull($this->scheduler($schedule, $start+180)->pausedInfo('export'));
+		$this->assertSame(Scheduler::OK, $this->scheduler($schedule, $start+180)->run()['export']['status']);
+		$this->assertNull($this->scheduler($schedule, $start+240)->resume('export'));		// Not paused any more
+	}
+
+	public function testForcedRunIgnoresThePause(): void
+	{
+		$schedule=new Schedule($this->dir);
+		$schedule->every('1 minute', $this->script('export', 'echo "exported";'));
+		$this->scheduler($schedule, time())->pause('export');
+		$this->assertSame(Scheduler::OK, $this->scheduler($schedule, time())->run('export')['export']['status']);
+		$this->assertNotNull($this->scheduler($schedule, time())->pausedInfo('export'));		// Still paused
+	}
+
+	public function testPausingTwiceKeepsTheFirstPause(): void
+	{
+		$schedule=new Schedule($this->dir);
+		$schedule->every('1 minute', $this->script('export', 'exit(0);'));
+		$start=strtotime('2026-10-27 10:00:00 UTC');
+		$this->assertTrue($this->scheduler($schedule, $start)->pause('export', 'anna'));
+		$this->assertFalse($this->scheduler($schedule, $start+600)->pause('export', 'ben', 'other reason'));
+		$this->assertSame(['since'=>$start, 'by'=>'anna', 'reason'=>null], $this->scheduler($schedule, $start+600)->pausedInfo('export'));
+	}
+
+	public function testPausedReminderEveryTwoHours(): void
+	{
+		$schedule=new Schedule($this->dir);
+		$schedule->every('1 minute', $this->script('export', 'exit(0);'));
+		$start=strtotime('2026-10-27 10:00:00 UTC');
+		$this->scheduler($schedule, $start)->pause('export', 'anna', 'Paper change');
+		$eventsAfter=function(int $minutes) use ($schedule, $start)
+		{
+			$this->scheduler($schedule, $start+$minutes*60)->run();
+			return count($this->events());
+		};
+		$this->assertSame(0, $eventsAfter(1));
+		$this->assertSame(0, $eventsAfter(119));
+		$this->assertSame(1, $eventsAfter(120));		// 2 hours: reminded
+		$this->assertSame(1, $eventsAfter(121));
+		$this->assertSame(2, $eventsAfter(240));		// 2 hours later again
+		$event=$this->events()[0];
+		$this->assertSame('warning', $event['level']);
+		$this->assertSame('task_paused', $event['event_type']);
+		$this->assertSame('Task export is still paused, since 2026-10-27 10:00 UTC by anna: Paper change', $event['message']);
+	}
+
+	public function testPauseOfUnknownTask(): void
+	{
+		$this->expectException(\InvalidArgumentException::class);
+		$this->scheduler(new Schedule($this->dir), time())->pause('nothing');
+	}
+
 	public function testStateDirIsRequired(): void
 	{
 		$this->expectException(\InvalidArgumentException::class);
