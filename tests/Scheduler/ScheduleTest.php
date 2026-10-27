@@ -144,4 +144,107 @@ final class ScheduleTest extends TestCase
 		$this->assertFalse($task->isDue($ranTheDayBefore, $this->at('2026-03-29 01:59'), $this->zurich));
 		$this->assertTrue($task->isDue($ranTheDayBefore, $this->at('2026-03-29 03:30'), $this->zurich));
 	}
+
+	// --- Windows & days ---
+
+	public function testBetweenRunsOnlyInTheWindow(): void
+	{
+		$task=(new Schedule('C:/app'))->every('15 minutes', 'a.php')->between('07:30', '21:30');
+		$ranLastEvening=$this->at('2026-10-27 21:30');
+		$this->assertFalse($task->isDue(null, $this->at('2026-10-28 07:29'), $this->zurich));			// Never run, but outside
+		$this->assertFalse($task->isDue($ranLastEvening, $this->at('2026-10-27 23:00'), $this->zurich));
+		$this->assertTrue($task->isDue($ranLastEvening, $this->at('2026-10-28 07:30'), $this->zurich));		// Start of the window
+		$this->assertSame($this->at('2026-10-28 07:30'), $task->nextRun($ranLastEvening, $this->at('2026-10-27 23:00'), $this->zurich));
+
+		$ranAt2120=$this->at('2026-10-28 21:20');
+		$this->assertFalse($task->isDue($ranAt2120, $this->at('2026-10-28 21:34'), $this->zurich));		// 21:35 is outside
+		$this->assertSame($this->at('2026-10-29 07:30'), $task->nextRun($ranAt2120, $this->at('2026-10-28 21:25'), $this->zurich));
+		$this->assertSame($this->at('2026-10-28 21:30'), $task->nextRun($this->at('2026-10-28 21:15'), $this->at('2026-10-28 21:20'), $this->zurich));
+		$this->assertTrue($task->isDue($this->at('2026-10-28 21:15'), $this->at('2026-10-28 21:30'), $this->zurich));	// The end is included
+	}
+
+	public function testWindowStartRunsAtOnceWhateverTheInterval(): void
+	{
+		$task=(new Schedule('C:/app'))->every('12 hours', 'a.php')->between('07:30', '21:30');
+		$this->assertTrue($task->isDue($this->at('2026-10-27 21:00'), $this->at('2026-10-28 07:30'), $this->zurich));
+	}
+
+	public function testWindowAcrossMidnight(): void
+	{
+		$task=(new Schedule('C:/app'))->every('1 hour', 'a.php')->between('22:00', '06:00');
+		$this->assertTrue($task->isDue(null, $this->at('2026-10-27 23:00'), $this->zurich));
+		$this->assertTrue($task->isDue($this->at('2026-10-28 00:00'), $this->at('2026-10-28 01:00'), $this->zurich));
+		$this->assertTrue($task->isDue($this->at('2026-10-28 05:00'), $this->at('2026-10-28 06:00'), $this->zurich));
+		$this->assertFalse($task->isDue($this->at('2026-10-28 05:00'), $this->at('2026-10-28 06:01'), $this->zurich));
+		$this->assertFalse($task->isDue(null, $this->at('2026-10-28 12:00'), $this->zurich));
+		$this->assertSame($this->at('2026-10-28 22:00'), $task->nextRun($this->at('2026-10-28 06:00'), $this->at('2026-10-28 12:00'), $this->zurich));
+	}
+
+	public function testWeekdays(): void
+	{
+		// 2026-10-30 is a Friday, 2026-11-02 a Monday
+		$task=(new Schedule('C:/app'))->every('15 minutes', 'a.php')->between('07:30', '21:30')->weekdays();
+		$ranFridayEvening=$this->at('2026-10-30 21:30');
+		$this->assertFalse($task->isDue($ranFridayEvening, $this->at('2026-10-31 10:00'), $this->zurich));	// Saturday
+		$this->assertTrue($task->isDue($ranFridayEvening, $this->at('2026-11-02 07:30'), $this->zurich));
+		$this->assertSame($this->at('2026-11-02 07:30'), $task->nextRun($ranFridayEvening, $this->at('2026-10-31 10:00'), $this->zurich));
+	}
+
+	public function testDaysWithoutWindowIsTheWholeDay(): void
+	{
+		$task=(new Schedule('C:/app'))->every('1 hour', 'a.php')->weekends();
+		$this->assertTrue($task->isDue(null, $this->at('2026-10-31 00:00'), $this->zurich));		// Saturday
+		$this->assertTrue($task->isDue(null, $this->at('2026-11-01 23:59'), $this->zurich));		// Sunday
+		$this->assertFalse($task->isDue(null, $this->at('2026-11-02 00:00'), $this->zurich));		// Monday
+	}
+
+	public function testOvernightWindowBelongsToTheDayItStarts(): void
+	{
+		$task=(new Schedule('C:/app'))->every('1 hour', 'a.php')->between('22:00', '06:00')->days('fri');
+		$this->assertTrue($task->isDue(null, $this->at('2026-10-31 03:00'), $this->zurich));		// Saturday night, Friday's window
+		$this->assertFalse($task->isDue(null, $this->at('2026-10-30 03:00'), $this->zurich));		// Friday night, Thursday's window
+	}
+
+	public function testDailyOnSomeDays(): void
+	{
+		$task=(new Schedule('C:/app'))->daily('02:00', 'a.php')->weekdays();
+		$ranFriday=$this->at('2026-10-30 02:00');
+		$this->assertFalse($task->isDue($ranFriday, $this->at('2026-10-31 02:00'), $this->zurich));		// Saturday
+		$this->assertFalse($task->isDue($ranFriday, $this->at('2026-11-01 12:00'), $this->zurich));		// Sunday
+		$this->assertTrue($task->isDue($ranFriday, $this->at('2026-11-02 02:00'), $this->zurich));
+		$this->assertSame($this->at('2026-11-02 02:00'), $task->nextRun($ranFriday, $this->at('2026-10-31 02:00'), $this->zurich));
+	}
+
+	public function testDays(): void
+	{
+		$schedule=new Schedule('C:/app');
+		$this->assertSame('every minute 07:30-21:30 Mon-Fri', $schedule->every('1 minute', 'a.php')->between('07:30', '21:30')->weekdays()->describe());
+		$this->assertSame('every hour Mon,Wed', $schedule->every('1 hour', 'b.php')->days('Wednesday', 'mon', 1)->describe());
+		$this->assertSame('daily at 02:00 Sat,Sun', $schedule->daily('02:00', 'c.php')->days(7, 'SAT')->describe());
+		$this->assertSame('every 2 hours 22:00-06:00', $schedule->every('2 hours', 'd.php')->between('22:00', '06:00')->describe());
+		$this->assertSame('every hour Tue-Thu', $schedule->every('1 hour', 'e.php')->days('thu', 'tue', 'wed')->describe());
+	}
+
+	public function testInvalidWindowsAndDays(): void
+	{
+		$schedule=new Schedule('C:/app');
+		$invalid=[
+			fn() => $schedule->every('1 hour', 'a.php')->between('7:30', '21:30'),
+			fn() => $schedule->every('1 hour', 'b.php')->between('08:00', '08:00'),
+			fn() => $schedule->daily('02:00', 'c.php')->between('01:00', '03:00'),
+			fn() => $schedule->every('1 hour', 'd.php')->days('noday'),
+			fn() => $schedule->every('1 hour', 'e.php')->days(8),
+			fn() => $schedule->every('1 hour', 'f.php')->days(),
+		];
+		foreach($invalid as $i => $call)
+		{
+			try
+			{
+				$call();
+				$this->fail("Case $i was accepted");
+			}
+			catch(\InvalidArgumentException $e)
+			{	$this->assertStringContainsString('Task ', $e->getMessage());	}
+		}
+	}
 }

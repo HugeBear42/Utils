@@ -11,6 +11,7 @@ namespace HugeBear42\Utils\Scheduler;
 		$schedule->every('1 minute', 'CLI/exportPendingJobs.php');
 		$schedule->every('2 hours', 'CLI/report.php', ['--short'])->timeout(600);  // With arguments & its own time limit
 		$schedule->daily('02:00', 'CLI/cleanupEvents.php');
+		$schedule->every('15 minutes', 'CLI/import.php')->between('07:30', '21:30')->weekdays();   // Office hours only (Task v1.01)
 
 	- The intervals are whole minutes: '1 minute', '15 minutes', '1 hour', '6 hours'
 	- A task is named after its script ('exportPendingJobs'), or by the last argument of every()/daily() when one script
