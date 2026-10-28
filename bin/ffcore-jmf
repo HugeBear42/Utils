@@ -1,0 +1,140 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+/**
+	2026-10-28	v1.00	frank.a.hubert@gmail.com: Queries Xerox FreeFlow Core over JMF from the command line (Jmf\FreeFlowCoreClient).
+						From FFCoreJMF/ffcore_jmf.php.
+
+	Installed by Composer as vendor/bin/ffcore-jmf (vendor\bin\ffcore-jmf.bat on Windows).
+	Usage: ffcore-jmf <command> [options]
+**/
+
+use HugeBear42\Utils\Jmf\FreeFlowCoreClient;
+use HugeBear42\Utils\Jmf\JmfException;
+
+const USAGE = <<<'TXT'
+	Usage: ffcore-jmf <command> [options]
+
+	Commands:
+	  known                                     the JMF messages this FreeFlow Core supports
+	  queue [--status=<status>]                 the queue entries (jobs), optionally only Waiting, Running, Completed...
+	  status --qe=<QueueEntryID> | --job=<JobID>  one job
+	  subscribe --signal-url=<url> [--repeat=60]  FreeFlow Core posts QueueStatus signals to <url>
+	  unsubscribe --channel=<ChannelID> --signal-url=<url>
+
+	Options:
+	  --endpoint=<url>   e.g. http://ffcore01:7751/FreeFlowCore, else the FFCORE_JMF_URL environment variable
+	  --raw              prints the raw JMF answer (XML) instead of JSON
+	  --ca=<file>        CA certificate for HTTPS with a private CA (port 7759), else FFCORE_CA_FILE
+	  --no-proxy         ignores the http_proxy/https_proxy variables, also FFCORE_NO_PROXY=1
+	  --verbose          prints the HTTP conversation to STDERR, also FFCORE_DEBUG=1
+	  --timeout=<s>      seconds for the whole request (default 60)
+	  --sender=<id>      the JMF SenderID (default HugeBear42Utils)
+
+	Exit code: 0 ok, 1 wrong usage, 2 the request failed
+
+	TXT;
+
+if(PHP_SAPI !== 'cli')
+{
+	http_response_code(403);
+	exit("This script must be run from the command line\n");
+}
+
+// The autoloader: given by the Composer proxy (vendor/bin), else this package installed in vendor/ or on its own
+$autoload = $GLOBALS['_composer_autoload_path'] ?? null;
+foreach([__DIR__.'/../../../autoload.php', __DIR__.'/../vendor/autoload.php'] as $candidate)
+{
+	if($autoload === null && is_file($candidate))
+	{	$autoload = $candidate;	}
+}
+if($autoload === null)
+{
+	fwrite(STDERR, "ffcore-jmf: vendor/autoload.php not found, run composer install\n");
+	exit(1);
+}
+require $autoload;
+
+// The command & the options: --name=value or --flag, in any order (PHP's getopt() stops at the command)
+$command = null;
+$options = [];
+foreach(array_slice($argv, 1) as $argument)
+{
+	if(preg_match('/^--([a-z-]+)(?:=(.*))?$/s', $argument, $match))
+	{	$options[$match[1]] = $match[2] ?? true;	}
+	else if($command === null)
+	{	$command = $argument;	}
+	else
+	{	usage("unexpected argument '$argument'");	}
+}
+$known = ['endpoint', 'raw', 'ca', 'no-proxy', 'verbose', 'timeout', 'sender', 'status', 'qe', 'job', 'signal-url', 'repeat', 'channel', 'help'];
+foreach(array_keys($options) as $name)
+{
+	if(!in_array($name, $known, true))
+	{	usage("unknown option --$name");	}
+}
+if($command === null || $command === 'help' || isset($options['help']))
+{
+	fwrite(STDOUT, USAGE);
+	exit($command === null && !isset($options['help']) ? 1 : 0);
+}
+
+// A text option: its value, null if not given. "--name" without a value is a usage error
+function value(string $name, bool $required = false) : ?string
+{
+	global $options;
+	if(!isset($options[$name]))
+	{
+		if($required)
+		{	usage("--$name=... is required");	}
+		return null;
+	}
+	if($options[$name] === true || $options[$name] === '')
+	{	usage("--$name needs a value: --$name=...");	}
+	return $options[$name];
+}
+
+function usage(string $error) : never
+{
+	fwrite(STDERR, "ffcore-jmf: $error\n\n".USAGE);
+	exit(1);
+}
+
+$endpoint = value('endpoint') ?? (getenv('FFCORE_JMF_URL') ?: null);
+if($endpoint === null)
+{	usage('no endpoint: give --endpoint=http://<host>:7751/FreeFlowCore or set FFCORE_JMF_URL');	}
+$clientOptions = [
+	'caFile'  => value('ca') ?? (getenv('FFCORE_CA_FILE') ?: null),
+	'proxy'   => isset($options['no-proxy']) || getenv('FFCORE_NO_PROXY') ? '' : null,
+	'verbose' => isset($options['verbose']) || (bool)getenv('FFCORE_DEBUG'),
+];
+if(($timeout = value('timeout')) !== null)
+{	$clientOptions['timeout'] = max(1, (int)$timeout);	}
+if(($sender = value('sender')) !== null)
+{	$clientOptions['senderId'] = $sender;	}
+
+try
+{
+	$client = new FreeFlowCoreClient($endpoint, $clientOptions);
+	$result = match($command) {
+		'known'       => $client->knownMessages(),
+		'queue'       => $client->queueStatus(value('status')),
+		'status'      => (value('qe') ?? value('job')) === null
+							? usage('status needs --qe=<QueueEntryID> or --job=<JobID>')
+							: $client->jobStatus(value('qe'), value('job')),
+		'subscribe'   => $client->subscribeQueueStatus(value('signal-url', true), (int)(value('repeat') ?? 60)),
+		'unsubscribe' => $client->unsubscribe(value('channel', true), value('signal-url', true)),
+		default       => usage("unknown command '$command'"),
+	};
+	echo isset($options['raw']) ? $client->lastResponse() : json_encode($result, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE), "\n";
+	exit(0);
+}
+catch(JmfException | \InvalidArgumentException $e)
+{
+	fwrite(STDERR, 'ffcore-jmf: '.$e->getMessage()."\n");
+	if(isset($client) && $client->lastResponse() !== null && isset($options['raw']))
+	{	fwrite(STDERR, "--- raw JMF answer ---\n".$client->lastResponse()."\n");	}
+	exit(2);
+}

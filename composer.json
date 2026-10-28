@@ -7,6 +7,11 @@
         "php": "^8.1",
       "ext-pdo": "*"
     },
+    "bin": ["bin/ffcore-jmf"],
+    "suggest": {
+        "ext-curl": "For Jmf\\FreeFlowCoreClient",
+        "ext-simplexml": "For Jmf\\FreeFlowCoreClient & Jmf\\JmfParser"
+    },
     "autoload": {
         "psr-4": {
             "HugeBear42\\Utils\\": "src/"
